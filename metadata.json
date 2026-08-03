@@ -1,0 +1,6 @@
+{
+  "name": "T-Shirt Print Design Showcase",
+  "description": "Responsive 4-column T-shirt printing artwork collection with category filtering, print spec inspector, lightbox viewer, and bottom admin management panel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
