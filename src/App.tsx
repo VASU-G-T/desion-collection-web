@@ -70,6 +70,29 @@ export default function App() {
   // Lightbox Modal Image
   const [lightboxImage, setLightboxImage] = useState<ImageItem | null>(null);
 
+  // Handle Browser Back Button for Lightbox
+  useEffect(() => {
+    const handlePopState = () => {
+      setLightboxImage(null);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const handleCloseLightbox = () => {
+    if (window.history.state?.lightbox) {
+      window.history.back();
+    } else {
+      setLightboxImage(null);
+    }
+  };
+
+  useEffect(() => {
+    if (lightboxImage && !window.history.state?.lightbox) {
+      window.history.pushState({ lightbox: true }, '');
+    }
+  }, [lightboxImage]);
+
   // Storage Stats
   const [stats, setStats] = useState<StorageStats>({
     totalCount: 0,
@@ -560,7 +583,7 @@ export default function App() {
       <LightboxModal
         image={lightboxImage}
         imageList={filteredImages}
-        onClose={() => setLightboxImage(null)}
+        onClose={handleCloseLightbox}
         onToggleFavorite={handleToggleFavorite}
         onRequestDelete={isAdminLoggedIn ? handleOpenDeleteConfirm : undefined}
       />
