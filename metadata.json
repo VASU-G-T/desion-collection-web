@@ -1,0 +1,6 @@
+{
+  "name": "NextPrinters Collections Vault",
+  "description": "Showcase and manager for print & design collections backed by Firebase Authentication, Firestore, and Storage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

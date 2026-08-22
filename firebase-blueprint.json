@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "gallery_images": {
+      "title": "Gallery Image",
+      "description": "Print design artwork item stored in NextPrinters Collections Vault",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "author": { "type": "string" },
+        "url": { "type": "string" },
+        "storagePath": { "type": "string" },
+        "fileSize": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "downloadCount": { "type": "number" },
+        "favoriteCount": { "type": "number" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "aspectRatio": { "type": "string" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "views": { "type": "number" },
+        "printSpec": {
+          "type": "object",
+          "properties": {
+            "method": { "type": "string" },
+            "colorWay": { "type": "string" },
+            "material": { "type": "string" },
+            "printLocation": { "type": "string" },
+            "dpi": { "type": "number" }
+          }
+        }
+      },
+      "required": ["title", "category", "url", "createdAt"]
+    },
+    "custom_backgrounds": {
+      "title": "Custom Garment Background",
+      "description": "Permanent admin-uploaded garment background template for all users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "storagePath": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "uploadedByAdmin": { "type": "boolean" }
+      },
+      "required": ["name", "category", "imageUrl", "createdAt"]
+    }
+  }
+}

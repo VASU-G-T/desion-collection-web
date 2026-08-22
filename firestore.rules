@@ -1,0 +1,19 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /gallery_images/{imageId} {
+      // Public read access for showcase gallery
+      allow read: if true;
+      // Admin only create and delete
+      allow create, delete: if request.auth != null;
+      // Admin edit or public interaction counters (downloads, favorites, views)
+      allow update: if request.auth != null || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloadCount', 'favoriteCount', 'views']);
+    }
+    match /custom_backgrounds/{bgId} {
+      // Public read access so all users can use admin-uploaded garment backgrounds
+      allow read: if true;
+      // Allow public creation, update, and deletion of permanent backgrounds
+      allow create, update, delete: if true;
+    }
+  }
+}
