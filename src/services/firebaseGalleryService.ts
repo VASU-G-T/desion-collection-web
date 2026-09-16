@@ -23,7 +23,7 @@ const GALLERY_COLLECTION = 'gallery_images';
 const BACKGROUNDS_COLLECTION = 'custom_backgrounds';
 const OFFERS_COLLECTION = 'offers';
 const SETTINGS_COLLECTION = 'site_settings';
-const MAX_FILE_SIZE_MB = 100;
+const MAX_FILE_SIZE_MB = 500;
 const ALLOWED_MIME_TYPES = [
   'image/png',
   'image/jpeg',

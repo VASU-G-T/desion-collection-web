@@ -8,6 +8,14 @@ function openDb(): Promise<IDBDatabase> {
     if (typeof indexedDB === 'undefined') {
       return reject(new Error('IndexedDB not supported in this browser environment.'));
     }
+
+    // Request persistent storage for large high-res artwork persistence
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().then((persisted) => {
+        if (persisted) console.log('Storage persistence granted for high-capacity artwork vault.');
+      }).catch(() => {});
+    }
+
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
