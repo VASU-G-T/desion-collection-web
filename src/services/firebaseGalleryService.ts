@@ -149,7 +149,25 @@ async function compressImage(
       }
 
       // Save as PNG to preserve transparent alpha channel
-      const dataUrl = canvas.toDataURL('image/png');
+      let dataUrl = canvas.toDataURL('image/png');
+      
+      // Safety Check: If PNG data URL exceeds 600,000 characters (~600KB), re-encode to JPEG or shrink to keep under Firestore's 1MB limit
+      if (dataUrl.length > 600000) {
+        dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+      }
+      if (dataUrl.length > 600000) {
+        // Downscale canvas to 800px max if still large
+        const scale = 800 / Math.max(width, height);
+        const smallCanvas = document.createElement('canvas');
+        smallCanvas.width = Math.round(width * scale);
+        smallCanvas.height = Math.round(height * scale);
+        const sCtx = smallCanvas.getContext('2d');
+        if (sCtx) {
+          sCtx.drawImage(canvas, 0, 0, smallCanvas.width, smallCanvas.height);
+          dataUrl = smallCanvas.toDataURL('image/jpeg', 0.70);
+        }
+      }
+
       canvas.toBlob(
         (blob) => {
           if (blob) {
@@ -166,7 +184,7 @@ async function compressImage(
             resolve({ blob: fallbackBlob, dataUrl, width, height, aspectRatio });
           }
         },
-        'image/png'
+        file.type && file.type.includes('png') ? 'image/png' : 'image/jpeg'
       );
     };
     img.onerror = () => {
@@ -480,14 +498,15 @@ export async function uploadImageFile(
   // 2. Upload to Firebase Storage with fast 2.5s timeout & instant fallback
   try {
     const uploadTask = uploadBytesResumable(storageRef, blob, {
-      contentType: 'image/jpeg'
+      contentType: file.type || 'image/png'
     });
 
     const uploadPromise = new Promise<string>((resolve, reject) => {
+      // 20s timeout safeguard for slow networks
       const timeoutTimer = setTimeout(() => {
         try { uploadTask.cancel(); } catch {}
-        reject(new Error('Ultra-fast storage fallback triggered'));
-      }, 1200);
+        reject(new Error('Storage upload timeout, using optimized data URL.'));
+      }, 20000);
 
       uploadTask.on(
         'state_changed',
@@ -696,7 +715,7 @@ export async function uploadBackgroundFile(
       const timeoutTimer = setTimeout(() => {
         try { uploadTask.cancel(); } catch {}
         reject(new Error('Storage fallback triggered for background upload'));
-      }, 1500);
+      }, 20000);
 
       uploadTask.on(
         'state_changed',
