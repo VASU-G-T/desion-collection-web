@@ -315,7 +315,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     Drag and drop your print artwork here, or <span className="text-sky-400 underline">browse</span>
                   </p>
                   <p className="text-xs text-slate-400">
-                    Supported formats: PNG, JPG, JPEG, WEBP • Max file size: <strong className="text-slate-800">20 MB</strong>
+                    Supported formats: PNG, JPG, JPEG, WEBP • Max file size: <strong className="text-slate-800">100 MB</strong>
                   </p>
                 </div>
               )}

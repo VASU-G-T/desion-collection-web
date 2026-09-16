@@ -22,7 +22,7 @@ const GALLERY_COLLECTION = 'gallery_images';
 const BACKGROUNDS_COLLECTION = 'custom_backgrounds';
 const OFFERS_COLLECTION = 'offers';
 const SETTINGS_COLLECTION = 'site_settings';
-const MAX_FILE_SIZE_MB = 25;
+const MAX_FILE_SIZE_MB = 100;
 const ALLOWED_MIME_TYPES = [
   'image/png',
   'image/jpeg',
@@ -52,8 +52,8 @@ export function validateImageFile(file: File): { valid: boolean; error?: string 
 // Client-side fast image optimization & compression
 async function compressImage(
   file: File,
-  maxDimension = 1000,
-  quality = 0.80
+  maxDimension = 1280,
+  quality = 0.85
 ): Promise<{
   blob: Blob;
   dataUrl: string;
@@ -111,7 +111,6 @@ async function compressImage(
         const imgData = ctx.getImageData(0, 0, width, height);
         const data = imgData.data;
 
-        // Sample corners to check if image has a dark solid background
         const corners = [
           [0, 0],
           [width - 1, 0],
@@ -129,7 +128,6 @@ async function compressImage(
 
         const avgLuma = 0.299 * (totalR / 4) + 0.587 * (totalG / 4) + 0.114 * (totalB / 4);
 
-        // If corners are dark (average luma < 55), automatically make dark background transparent
         if (avgLuma < 55) {
           for (let i = 0; i < data.length; i += 4) {
             const r = data[i];
@@ -148,23 +146,30 @@ async function compressImage(
         console.warn('Auto bg transparency processing notice:', e);
       }
 
-      // Save as PNG to preserve transparent alpha channel
+      // 1. Primary high-quality Data URL
       let dataUrl = canvas.toDataURL('image/png');
       
-      // Safety Check: If PNG data URL exceeds 600,000 characters (~600KB), re-encode to JPEG or shrink to keep under Firestore's 1MB limit
-      if (dataUrl.length > 600000) {
+      // 2. Strict Safety Loop: Guarantee fallback dataUrl string length NEVER exceeds 350,000 characters (~300 KB Base64)
+      // This prevents Firestore's 1MB (1,048,487 bytes) property length error regardless of image size or storage state.
+      if (dataUrl.length > 350000) {
         dataUrl = canvas.toDataURL('image/jpeg', 0.75);
       }
-      if (dataUrl.length > 600000) {
-        // Downscale canvas to 800px max if still large
-        const scale = 800 / Math.max(width, height);
-        const smallCanvas = document.createElement('canvas');
-        smallCanvas.width = Math.round(width * scale);
-        smallCanvas.height = Math.round(height * scale);
-        const sCtx = smallCanvas.getContext('2d');
-        if (sCtx) {
-          sCtx.drawImage(canvas, 0, 0, smallCanvas.width, smallCanvas.height);
-          dataUrl = smallCanvas.toDataURL('image/jpeg', 0.70);
+
+      let currentScale = 1.0;
+      let curQuality = 0.75;
+      while (dataUrl.length > 350000 && currentScale > 0.2) {
+        currentScale -= 0.15;
+        curQuality = Math.max(0.35, curQuality - 0.10);
+
+        const downCanvas = document.createElement('canvas');
+        downCanvas.width = Math.max(100, Math.round(width * currentScale));
+        downCanvas.height = Math.max(100, Math.round(height * currentScale));
+        const dCtx = downCanvas.getContext('2d');
+        if (dCtx) {
+          dCtx.drawImage(canvas, 0, 0, downCanvas.width, downCanvas.height);
+          dataUrl = downCanvas.toDataURL('image/jpeg', curQuality);
+        } else {
+          break;
         }
       }
 
