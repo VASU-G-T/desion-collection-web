@@ -304,6 +304,7 @@ export default function App() {
         searchQuery={filterState.searchQuery}
         setSearchQuery={(q) => setFilterState((prev) => ({ ...prev, searchQuery: q }))}
         isSyncing={isSyncing}
+        artworks={images}
       />
 
       {/* Filter Toolbar */}
