@@ -17,6 +17,7 @@ import {
 } from 'firebase/firestore';
 import { db, storage } from '../config/firebase';
 import { ImageItem, Category, PrintSpec, MockupBackground, GarmentType } from '../types';
+import { storeImageInIndexedDb, getImageFromIndexedDb } from './imageStorageDb';
 
 const GALLERY_COLLECTION = 'gallery_images';
 const BACKGROUNDS_COLLECTION = 'custom_backgrounds';
@@ -146,24 +147,24 @@ async function compressImage(
         console.warn('Auto bg transparency processing notice:', e);
       }
 
-      // 1. Primary high-quality Data URL
+      // 1. Primary Data URL
       let dataUrl = canvas.toDataURL('image/png');
       
-      // 2. Strict Safety Loop: Guarantee fallback dataUrl string length NEVER exceeds 350,000 characters (~300 KB Base64)
-      // This prevents Firestore's 1MB (1,048,487 bytes) property length error regardless of image size or storage state.
-      if (dataUrl.length > 350000) {
-        dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+      // 2. Strict Safety Loop: Guarantee fallback dataUrl string length NEVER exceeds 200,000 characters (~150 KB)
+      // This prevents Firestore's 1MB (1,048,487 bytes) property length error permanently.
+      if (dataUrl.length > 200000) {
+        dataUrl = canvas.toDataURL('image/jpeg', 0.70);
       }
 
       let currentScale = 1.0;
-      let curQuality = 0.75;
-      while (dataUrl.length > 350000 && currentScale > 0.2) {
+      let curQuality = 0.70;
+      while (dataUrl.length > 200000 && currentScale > 0.15) {
         currentScale -= 0.15;
-        curQuality = Math.max(0.35, curQuality - 0.10);
+        curQuality = Math.max(0.30, curQuality - 0.10);
 
         const downCanvas = document.createElement('canvas');
-        downCanvas.width = Math.max(100, Math.round(width * currentScale));
-        downCanvas.height = Math.max(100, Math.round(height * currentScale));
+        downCanvas.width = Math.max(80, Math.round(width * currentScale));
+        downCanvas.height = Math.max(80, Math.round(height * currentScale));
         const dCtx = downCanvas.getContext('2d');
         if (dCtx) {
           dCtx.drawImage(canvas, 0, 0, downCanvas.width, downCanvas.height);
@@ -422,11 +423,13 @@ export function subscribeToGallery(
   const colRef = collection(db, GALLERY_COLLECTION);
   return onSnapshot(
     colRef,
-    (snapshot) => {
+    async (snapshot) => {
       const items: ImageItem[] = [];
+      const idbPromises: Array<Promise<void>> = [];
+
       snapshot.forEach((docSnap) => {
         const data = docSnap.data();
-        items.push({
+        const item: ImageItem = {
           id: docSnap.id,
           title: data.title || 'Untitled Artwork',
           category: (data.category as Category) || 'T-Shirt',
@@ -450,8 +453,23 @@ export function subscribeToGallery(
             printLocation: 'Front Chest',
             dpi: 300,
           },
-        });
+        };
+
+        if (item.url && item.url.startsWith('idb://')) {
+          const key = item.url.replace('idb://', '');
+          idbPromises.push(
+            getImageFromIndexedDb(key).then((blobUrl) => {
+              if (blobUrl) item.url = blobUrl;
+            })
+          );
+        }
+
+        items.push(item);
       });
+
+      if (idbPromises.length > 0) {
+        await Promise.all(idbPromises);
+      }
 
       // Sort by creation date descending
       items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -489,35 +507,35 @@ export async function uploadImageFile(
   if (onProgress) onProgress(15);
 
   // 1. Client-side ultra-fast image compression
-  const { blob, dataUrl, width, height, aspectRatio } = await compressImage(file, 1280, 0.82);
+  const { blob, dataUrl, width, height, aspectRatio } = await compressImage(file, 1600, 0.88);
 
   if (onProgress) onProgress(45);
 
   const timestamp = Date.now();
   const safeFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
   const storagePath = `gallery_artwork/${timestamp}_${safeFileName}`;
+  const docId = `art_${timestamp}`;
   const storageRef = ref(storage, storagePath);
 
   let finalDownloadUrl = '';
 
-  // 2. Upload to Firebase Storage with fast 2.5s timeout & instant fallback
+  // 2. Upload to Firebase Storage with timeout & IndexedDB fallback
   try {
     const uploadTask = uploadBytesResumable(storageRef, blob, {
       contentType: file.type || 'image/png'
     });
 
     const uploadPromise = new Promise<string>((resolve, reject) => {
-      // 20s timeout safeguard for slow networks
       const timeoutTimer = setTimeout(() => {
         try { uploadTask.cancel(); } catch {}
-        reject(new Error('Storage upload timeout, using optimized data URL.'));
-      }, 20000);
+        reject(new Error('Storage upload timeout'));
+      }, 15000);
 
       uploadTask.on(
         'state_changed',
         (snapshot) => {
           if (snapshot.totalBytes > 0) {
-            const pct = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 40) + 45; // 45% to 85%
+            const pct = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 40) + 45;
             if (onProgress) onProgress(Math.min(pct, 85));
           }
         },
@@ -539,14 +557,15 @@ export async function uploadImageFile(
 
     finalDownloadUrl = await uploadPromise;
   } catch (storageError) {
-    console.log('Using optimized fast Data URL for instant rendering:', storageError);
-    finalDownloadUrl = dataUrl;
+    console.log('Firebase storage bypass -> Storing HD Blob in IndexedDB:', storageError);
+    // Store original blob locally in IndexedDB so URL is a tiny 25-character idb:// string
+    const idbPath = await storeImageInIndexedDb(docId, blob);
+    finalDownloadUrl = idbPath || dataUrl;
   }
 
   if (onProgress) onProgress(90);
 
   const formattedFileSize = formatBytes(blob.size || file.size);
-  const docId = `art_${timestamp}`;
 
   const newItem: ImageItem = {
     id: docId,
