@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Printer, ShieldCheck, UploadCloud, LogIn, LogOut, Sparkles, Search, Clock, Tag, Folder, X, ArrowRight } from 'lucide-react';
+import { Printer, UploadCloud, LogIn, LogOut, Sparkles, Search, Clock, Tag, Folder, X, ArrowRight, Package } from 'lucide-react';
 import { AdminUser, SiteSettings, ImageItem } from '../types';
 
 interface NavbarProps {
@@ -8,6 +8,8 @@ interface NavbarProps {
   onOpenLogin: () => void;
   onLogout: () => void;
   onOpenMockupStudio: () => void;
+  onOpenOrderTracker?: () => void;
+  unreadNotificationsCount?: number;
   totalArtworks: number;
   totalDownloads: number;
   searchQuery: string;
@@ -23,6 +25,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenLogin,
   onLogout,
   onOpenMockupStudio,
+  onOpenOrderTracker,
+  unreadNotificationsCount = 0,
   totalArtworks,
   totalDownloads,
   searchQuery,
@@ -339,6 +343,23 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <strong className="text-sky-600 font-semibold">{totalDownloads}</strong>
               </div>
             </div>
+
+            {/* Track Order & Submit Payment Button */}
+            {onOpenOrderTracker && (
+              <button
+                onClick={onOpenOrderTracker}
+                className="relative p-2 sm:px-3 sm:py-2 bg-slate-100 hover:bg-slate-200 border border-slate-300/80 text-slate-800 hover:text-sky-700 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm"
+                title="Track Order, Courier Status & Submit Payment"
+              >
+                <Package className="w-4 h-4 text-amber-500" />
+                <span className="hidden sm:inline">Track Order</span>
+                {unreadNotificationsCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[10px] font-extrabold">
+                    {unreadNotificationsCount}
+                  </span>
+                )}
+              </button>
+            )}
 
             {/* Mockup Studio Button */}
             <button

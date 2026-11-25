@@ -1,10 +1,33 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Category, PrintSpec, ImageItem, AdminUser, MockupBackground } from '../types';
-import { uploadImageFile, validateImageFile, deleteImage } from '../services/firebaseGalleryService';
-import { X, UploadCloud, Layers, CheckCircle2, AlertTriangle, Trash2, FileImage, Sparkles, HardDrive, ShieldCheck, Lock, Image as ImageIcon, Tag, Settings, ShoppingBag } from 'lucide-react';
+import {
+  uploadImageFile,
+  validateImageFile,
+  deleteImage,
+  subscribeToOrders,
+  getEffectivePaymentStatus,
+} from '../services/firebaseGalleryService';
+import {
+  X,
+  UploadCloud,
+  Layers,
+  CheckCircle2,
+  AlertTriangle,
+  Trash2,
+  FileImage,
+  ShieldCheck,
+  Lock,
+  Tag,
+  Settings,
+  ShoppingBag,
+  CreditCard,
+  Truck,
+} from 'lucide-react';
 import { AdminOffersTab } from './AdminOffersTab';
 import { AdminSettingsTab } from './AdminSettingsTab';
 import { AdminOrdersTab } from './AdminOrdersTab';
+import { AdminPaymentsTab } from './AdminPaymentsTab';
+import { AdminCourierTab } from './AdminCourierTab';
 
 interface AdminPanelProps {
   isOpen: boolean;
@@ -15,6 +38,8 @@ interface AdminPanelProps {
   onOpenLogin: () => void;
   initialCategory?: Category;
 }
+
+type AdminTab = 'orders' | 'payments' | 'courier' | 'artwork' | 'offers' | 'settings';
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
   isOpen,
@@ -29,14 +54,35 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [dragActive, setDragActive] = useState(false);
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<Category>(initialCategory);
-  const [activeTab, setActiveTab] = useState<'artwork' | 'offers' | 'settings' | 'orders'>('artwork');
+  const [activeTab, setActiveTab] = useState<AdminTab>('orders');
+  const [focusedOrderId, setFocusedOrderId] = useState<string | null>(null);
+  const [pendingOrderBadge, setPendingOrderBadge] = useState(0);
+  const [pendingPaymentBadge, setPendingPaymentBadge] = useState(0);
 
   // Update category if initialCategory changes
-  React.useEffect(() => {
+  useEffect(() => {
     if (initialCategory) {
       setCategory(initialCategory);
     }
   }, [initialCategory, isOpen]);
+
+  // Live sidebar notification badges for orders & payment verification
+  useEffect(() => {
+    if (!isOpen || !adminUser) return;
+    const unsub = subscribeToOrders((orders) => {
+      setPendingOrderBadge(
+        orders.filter((o) => o.status === 'Pending' || o.status === 'Payment Verification').length
+      );
+      setPendingPaymentBadge(
+        orders.filter((o) => {
+          const ps = getEffectivePaymentStatus(o);
+          return ps === 'Screenshot Uploaded' || ps === 'Under Verification';
+        }).length
+      );
+    });
+    return () => unsub();
+  }, [isOpen, adminUser]);
+
   const [description, setDescription] = useState('');
   const [author, setAuthor] = useState('NextPrinters Studio');
   const [tagsInput, setTagsInput] = useState('ScreenPrint, Apparel, Vintage');
@@ -64,23 +110,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         <div className="relative w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-2xl p-6 text-center space-y-4">
           <button
             onClick={onClose}
-            className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-white bg-slate-100 rounded-lg transition-colors"
+            className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-slate-900 bg-slate-100 rounded-lg transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
-          <div className="w-12 h-12 bg-sky-500/20 text-sky-400 rounded-xl border border-sky-500/30 flex items-center justify-center mx-auto">
+          <div className="w-12 h-12 bg-sky-50 text-sky-600 rounded-xl border border-sky-200 flex items-center justify-center mx-auto">
             <Lock className="w-6 h-6" />
           </div>
-          <h2 className="text-lg font-bold text-white">Admin Authentication Required</h2>
-          <p className="text-xs text-slate-400">
-            Only authenticated administrators can upload or delete artwork files in the NextPrinters Vault. Standard users are restricted to viewing, filtering, and downloading photos.
+          <h2 className="text-lg font-bold text-slate-900">Admin Authentication Required</h2>
+          <p className="text-xs text-slate-500">
+            Only authenticated administrators can access Order Management, Payment Verification, Courier Dispatch, and Artwork Vault controls.
           </p>
           <button
             onClick={() => {
               onClose();
               onOpenLogin();
             }}
-            className="w-full bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs transition-colors shadow-lg shadow-sky-500/20"
+            className="w-full bg-sky-500 hover:bg-sky-600 text-white font-bold py-2.5 rounded-xl text-xs transition-colors shadow-lg shadow-sky-500/20"
           >
             Sign In as Admin
           </button>
@@ -100,7 +146,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
     setFile(selectedFile);
     if (!title) {
-      // Auto-populate title from file name without extension
       const nameWithoutExt = selectedFile.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
       setTitle(nameWithoutExt.charAt(0).toUpperCase() + nameWithoutExt.slice(1));
     }
@@ -154,7 +199,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       );
 
       setSuccessMessage(`"${title || file.name}" uploaded successfully to Firebase Storage & Firestore!`);
-      // Reset form
       setFile(null);
       setTitle('');
       setDescription('');
@@ -179,69 +223,159 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
+  const sidebarItems: Array<{
+    id: AdminTab;
+    label: string;
+    icon: React.FC<{ className?: string }>;
+    badge?: number;
+  }> = [
+    { id: 'orders', label: 'Order Management', icon: ShoppingBag, badge: pendingOrderBadge },
+    { id: 'payments', label: 'Payment Verification', icon: CreditCard, badge: pendingPaymentBadge },
+    { id: 'courier', label: 'Courier & Delivery', icon: Truck },
+    { id: 'artwork', label: 'Artwork Vault', icon: UploadCloud },
+    { id: 'offers', label: 'Manage Offers', icon: Tag },
+    { id: 'settings', label: 'Site Branding & QR', icon: Settings },
+  ];
+
   return (
-    <div className="fixed inset-0 z-50 bg-slate-50/90 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
+    <div className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 lg:p-6 overflow-y-auto">
       <div
-        className="relative w-full max-w-4xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] my-auto"
+        className="relative w-full max-w-7xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[94vh] my-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 bg-sky-500/20 text-sky-400 rounded-lg border border-sky-500/30">
+        <div className="bg-slate-50 px-5 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-sky-50 text-sky-600 rounded-xl border border-sky-200">
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">NextPrinters Admin Control Vault</h2>
-              <p className="text-xs text-slate-400">Firebase Storage & Firestore Master Content Management</p>
+              <h2 className="text-base font-extrabold text-slate-900">
+                NextPrinters Admin Control Portal
+              </h2>
+              <p className="text-xs text-slate-500">
+                Order Management, Payment Verification, Courier Dispatch & Vault Content
+              </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white bg-slate-100 hover:bg-slate-700 rounded-lg transition-colors"
+            className="p-2 text-slate-500 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex items-center gap-2 px-6 py-2 border-b border-slate-200 bg-white overflow-x-auto">
-          <button 
-            onClick={() => setActiveTab('artwork')}
-            className={`px-4 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 ${activeTab === 'artwork' ? 'bg-sky-500 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <UploadCloud className="w-4 h-4" /> Artwork Vault
-          </button>
-          <button 
-            onClick={() => setActiveTab('orders')}
-            className={`px-4 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 ${activeTab === 'orders' ? 'bg-sky-500 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <ShoppingBag className="w-4 h-4" /> Customer Orders
-          </button>
-          <button 
-            onClick={() => setActiveTab('offers')}
-            className={`px-4 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 ${activeTab === 'offers' ? 'bg-sky-500 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <Tag className="w-4 h-4" /> Manage Offers
-          </button>
-          <button 
-            onClick={() => setActiveTab('settings')}
-            className={`px-4 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 ${activeTab === 'settings' ? 'bg-sky-500 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <Settings className="w-4 h-4" /> Site Branding & QR
-          </button>
+        {/* Mobile / Tablet Horizontal Sidebar Tabs */}
+        <div className="flex lg:hidden items-center gap-1.5 px-4 py-2.5 border-b border-slate-200 bg-white overflow-x-auto shrink-0">
+          {sidebarItems.map((item) => {
+            const Icon = item.icon;
+            const active = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => {
+                  setActiveTab(item.id);
+                  if (item.id !== 'payments' && item.id !== 'courier') setFocusedOrderId(null);
+                }}
+                className={`px-3 py-2 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+                  active
+                    ? 'bg-sky-500 text-white shadow-sm'
+                    : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{item.label}</span>
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span
+                    className={`px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${
+                      active ? 'bg-white text-sky-600' : 'bg-amber-500 text-white'
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
-        {/* Form & Table Content */}
-        <div className="p-6 overflow-y-auto space-y-8">
-          
-          {activeTab === 'orders' && <AdminOrdersTab />}
-          {activeTab === 'offers' && <AdminOffersTab />}
-          {activeTab === 'settings' && <AdminSettingsTab />}
-          
-          {activeTab === 'artwork' && (
-            <>
-              {/* Notification Messages */}
+        {/* Main Workspace: Desktop Left Sidebar + Content Area */}
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          {/* Desktop Admin Sidebar */}
+          <aside className="hidden lg:flex flex-col w-60 bg-slate-50 border-r border-slate-200 p-3.5 space-y-1.5 shrink-0 overflow-y-auto">
+            <p className="px-3 pt-1 pb-2 text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
+              Admin Navigation
+            </p>
+            {sidebarItems.map((item) => {
+              const Icon = item.icon;
+              const active = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    if (item.id !== 'payments' && item.id !== 'courier') setFocusedOrderId(null);
+                  }}
+                  className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-between gap-2 ${
+                    active
+                      ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
+                      : 'text-slate-700 hover:bg-white hover:text-sky-600 border border-transparent hover:border-slate-200'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <Icon className={`w-4 h-4 shrink-0 ${active ? 'text-white' : 'text-amber-500'}`} />
+                    <span className="truncate">{item.label}</span>
+                  </span>
+                  {item.badge !== undefined && item.badge > 0 && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${
+                        active ? 'bg-white text-sky-600' : 'bg-amber-500 text-white'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </aside>
+
+          {/* Content Scroll Area */}
+          <div className="flex-1 p-4 sm:p-6 overflow-y-auto space-y-6 bg-white">
+            {activeTab === 'orders' && (
+              <AdminOrdersTab
+                adminUser={adminUser}
+                onNavigateToPayment={(orderId) => {
+                  setFocusedOrderId(orderId);
+                  setActiveTab('payments');
+                }}
+                onNavigateToCourier={(orderId) => {
+                  setFocusedOrderId(orderId);
+                  setActiveTab('courier');
+                }}
+              />
+            )}
+            {activeTab === 'payments' && (
+              <AdminPaymentsTab
+                adminUser={adminUser}
+                focusedOrderId={focusedOrderId}
+                onClearFocus={() => setFocusedOrderId(null)}
+              />
+            )}
+            {activeTab === 'courier' && (
+              <AdminCourierTab
+                adminUser={adminUser}
+                focusedOrderId={focusedOrderId}
+                onClearFocus={() => setFocusedOrderId(null)}
+              />
+            )}
+            {activeTab === 'offers' && <AdminOffersTab />}
+            {activeTab === 'settings' && <AdminSettingsTab />}
+
+            {activeTab === 'artwork' && (
+              <>
+                {/* Notification Messages */}
           {errorMessage && (
             <div className="p-3.5 rounded-xl bg-red-950/80 border border-red-800/80 text-red-200 text-xs flex items-center gap-2.5">
               <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
@@ -523,8 +657,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </>
           )}
 
+          </div>
         </div>
       </div>
     </div>
   );
 };
+

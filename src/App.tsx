@@ -9,7 +9,8 @@ import {
   toggleFavoriteInFirestore,
   deleteImage,
   subscribeToOffers,
-  getSiteSettings
+  getSiteSettings,
+  subscribeToCustomerNotifications
 } from './services/firebaseGalleryService';
 
 import { Navbar } from './components/Navbar';
@@ -20,6 +21,7 @@ import { LightboxModal } from './components/LightboxModal';
 import { MockupModal } from './components/MockupModal';
 import { AdminPanel } from './components/AdminPanel';
 import { AdminLoginModal } from './components/AdminLoginModal';
+import { CustomerOrderPortalModal, getLocalCustomerOrderRefs } from './components/CustomerOrderPortalModal';
 
 import { Printer, UploadCloud, AlertCircle } from 'lucide-react';
 
@@ -60,7 +62,27 @@ export default function App() {
   const [isMockupOpen, setIsMockupOpen] = useState(false);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isOrderPortalOpen, setIsOrderPortalOpen] = useState(false);
+  const [portalOrderRef, setPortalOrderRef] = useState<{ id: string; phone: string }>({ id: '', phone: '' });
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
   const [uploadCategory, setUploadCategory] = useState<Category>('T-Shirt');
+
+  const handleOpenOrderPortal = (orderId = '', phone = '') => {
+    setPortalOrderRef({ id: orderId, phone });
+    setIsOrderPortalOpen(true);
+  };
+
+  useEffect(() => {
+    const refs = getLocalCustomerOrderRefs();
+    if (refs.length === 0) return;
+    const unsub = subscribeToCustomerNotifications(
+      refs.map((r) => r.id),
+      (list) => {
+        setUnreadNotificationsCount(list.filter((n) => !n.read).length);
+      }
+    );
+    return () => unsub();
+  }, [isOrderPortalOpen]);
 
   const handleOpenUploadForCategory = (cat: Category) => {
     setUploadCategory(cat);
@@ -299,6 +321,8 @@ export default function App() {
           }
           setIsMockupOpen(true);
         }}
+        onOpenOrderTracker={() => handleOpenOrderPortal()}
+        unreadNotificationsCount={unreadNotificationsCount}
         totalArtworks={images.length}
         totalDownloads={totalDownloads}
         searchQuery={filterState.searchQuery}
@@ -435,10 +459,20 @@ export default function App() {
         customBackgrounds={customBackgrounds}
         adminUser={adminUser}
         siteSettings={siteSettings}
+        onOpenOrderPortal={(orderId, phone) => handleOpenOrderPortal(orderId, phone)}
         onClose={() => {
           setIsMockupOpen(false);
           setMockupImage(null);
         }}
+      />
+
+      {/* Customer Order Tracking & Payment Submission Portal */}
+      <CustomerOrderPortalModal
+        isOpen={isOrderPortalOpen}
+        onClose={() => setIsOrderPortalOpen(false)}
+        siteSettings={siteSettings}
+        initialOrderId={portalOrderRef.id}
+        initialPhone={portalOrderRef.phone}
       />
 
       {/* Admin Panel Manager */}

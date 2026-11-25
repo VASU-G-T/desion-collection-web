@@ -49,6 +49,7 @@ interface MockupModalProps {
   adminUser?: AdminUser | null;
   siteSettings?: SiteSettings | null;
   onClose: () => void;
+  onOpenOrderPortal?: (orderId: string, phone: string) => void;
 }
 
 // Generate crisp, instant-loading vector SVG garment blank data URLs
@@ -114,9 +115,14 @@ export const MockupModal: React.FC<MockupModalProps> = ({
   allImages = [],
   customBackgrounds = [],
   adminUser = null,
+  siteSettings = null,
   onClose,
+  onOpenOrderPortal,
 }) => {
   if (!isOpen) return null;
+
+  // Order T-Shirt Modal state
+  const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
 
   // PRIVATE INSTANT SESSION UPLOADS (Customer temporary session uploads)
   const [sessionTempBgs, setSessionTempBgs] = useState<MockupBackground[]>([]);
@@ -1267,8 +1273,13 @@ export const MockupModal: React.FC<MockupModalProps> = ({
         onClose={() => setIsOrderModalOpen(false)}
         siteSettings={siteSettings || null}
         garmentName={selectedBackground?.name || 'Custom T-Shirt'}
+        garmentColor={selectedBackground?.name}
         mockupImageUrl={selectedBackground?.imageUrl}
         placedDesignsCount={placedArtworks.length}
+        onOpenOrderPortal={(orderId, phone) => {
+          onClose();
+          if (onOpenOrderPortal) onOpenOrderPortal(orderId, phone);
+        }}
       />
     </div>
   );

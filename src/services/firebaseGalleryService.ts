@@ -13,10 +13,30 @@ import {
   onSnapshot,
   increment,
   Unsubscribe,
-  getDoc
+  getDoc,
+  getDocs,
+  query,
+  where
 } from 'firebase/firestore';
 import { db, storage } from '../config/firebase';
-import { ImageItem, Category, PrintSpec, MockupBackground, GarmentType } from '../types';
+import {
+  ImageItem,
+  Category,
+  PrintSpec,
+  MockupBackground,
+  GarmentType,
+  TShirtOrder,
+  OrderStatus,
+  OrderPaymentStatus,
+  PaymentVerificationEntry,
+  CourierInfo,
+  DeliveryStatus,
+  DeliveryHistoryEntry,
+  CustomerNotification,
+  CustomerNotificationType,
+  AuditLogEntry,
+  AdminUser,
+} from '../types';
 import { storeImageInIndexedDb, getImageFromIndexedDb } from './imageStorageDb';
 
 const GALLERY_COLLECTION = 'gallery_images';
@@ -147,34 +167,46 @@ async function compressImage(
         console.warn('Auto bg transparency processing notice:', e);
       }
 
-      // 1. Primary Data URL
-      let dataUrl = canvas.toDataURL('image/png');
-      
-      // 2. Strict Safety Loop: Guarantee fallback dataUrl string length NEVER exceeds 200,000 characters (~150 KB)
-      // This prevents Firestore's 1MB (1,048,487 bytes) property length error permanently.
-      if (dataUrl.length > 200000) {
-        dataUrl = canvas.toDataURL('image/jpeg', 0.70);
+      // Convert heavy images to optimized WebP/JPEG format for minimal storage footprint & fast loading
+      let mimeType = 'image/webp';
+      let dataUrl = '';
+      try {
+        dataUrl = canvas.toDataURL('image/webp', 0.82);
+        if (!dataUrl.startsWith('data:image/webp')) {
+          mimeType = 'image/jpeg';
+          dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        }
+      } catch (e) {
+        mimeType = 'image/jpeg';
+        dataUrl = canvas.toDataURL('image/jpeg', 0.82);
       }
 
+      // Guarantee dataUrl string length remains strictly under 180,000 characters (~130 KB)
+      // This converts heavy multi-megabyte files into lightweight ~100KB-180KB stored formats while retaining visual sharpness.
       let currentScale = 1.0;
-      let curQuality = 0.70;
-      while (dataUrl.length > 200000 && currentScale > 0.15) {
-        currentScale -= 0.15;
-        curQuality = Math.max(0.30, curQuality - 0.10);
+      let curQuality = 0.82;
+      let activeCanvas = canvas;
+
+      while (dataUrl.length > 180000 && currentScale > 0.2) {
+        currentScale -= 0.12;
+        curQuality = Math.max(0.40, curQuality - 0.08);
 
         const downCanvas = document.createElement('canvas');
-        downCanvas.width = Math.max(80, Math.round(width * currentScale));
-        downCanvas.height = Math.max(80, Math.round(height * currentScale));
+        downCanvas.width = Math.max(120, Math.round(width * currentScale));
+        downCanvas.height = Math.max(120, Math.round(height * currentScale));
         const dCtx = downCanvas.getContext('2d');
         if (dCtx) {
+          dCtx.imageSmoothingEnabled = true;
+          dCtx.imageSmoothingQuality = 'high';
           dCtx.drawImage(canvas, 0, 0, downCanvas.width, downCanvas.height);
-          dataUrl = downCanvas.toDataURL('image/jpeg', curQuality);
+          activeCanvas = downCanvas;
+          dataUrl = downCanvas.toDataURL(mimeType, curQuality);
         } else {
           break;
         }
       }
 
-      canvas.toBlob(
+      activeCanvas.toBlob(
         (blob) => {
           if (blob) {
             resolve({ blob, dataUrl, width, height, aspectRatio });
@@ -190,7 +222,8 @@ async function compressImage(
             resolve({ blob: fallbackBlob, dataUrl, width, height, aspectRatio });
           }
         },
-        file.type && file.type.includes('png') ? 'image/png' : 'image/jpeg'
+        mimeType,
+        curQuality
       );
     };
     img.onerror = () => {
@@ -950,61 +983,381 @@ export async function uploadPaymentQrCode(file: File): Promise<{ url: string; st
   return { url: finalUrl, storagePath };
 }
 
-// --- T-SHIRT CUSTOMER ORDERS ---
+// --- T-SHIRT CUSTOMER ORDERS, PAYMENTS, COURIER & NOTIFICATIONS ---
 const ORDERS_COLLECTION = 'tshirt_orders';
+const NOTIFICATIONS_COLLECTION = 'customer_notifications';
+const MAX_SCREENSHOT_SIZE_MB = 10;
+
+function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefined(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const cleaned: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>).forEach(([k, v]) => {
+      if (v !== undefined) {
+        cleaned[k] = stripUndefined(v);
+      }
+    });
+    return cleaned as T;
+  }
+  return value;
+}
+
+export function normalizePhoneDigits(phone?: string): string {
+  return (phone || '').replace(/\D/g, '');
+}
+
+export function validatePaymentScreenshot(file: File): { valid: boolean; error?: string } {
+  if (!ALLOWED_MIME_TYPES.includes(file.type.toLowerCase())) {
+    return {
+      valid: false,
+      error: 'Invalid screenshot format. Allowed formats: JPG, JPEG, PNG, WEBP.',
+    };
+  }
+  const sizeMb = file.size / (1024 * 1024);
+  if (sizeMb > MAX_SCREENSHOT_SIZE_MB) {
+    return {
+      valid: false,
+      error: `Screenshot is too large (${sizeMb.toFixed(1)} MB). Max allowed is ${MAX_SCREENSHOT_SIZE_MB} MB.`,
+    };
+  }
+  return { valid: true };
+}
+
+async function uploadOrderScreenshotFile(orderId: string, file: File): Promise<string> {
+  const validation = validatePaymentScreenshot(file);
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Invalid screenshot file.');
+  }
+
+  const { blob, dataUrl } = await compressImage(file, 1280, 0.85);
+  const storagePath = `order_proofs/${orderId}_${Date.now()}_proof`;
+  const storageRef = ref(storage, storagePath);
+
+  try {
+    const uploadTask = uploadBytesResumable(storageRef, blob, {
+      contentType: blob.type || file.type || 'image/webp',
+    });
+    const uploadedUrl = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        try {
+          uploadTask.cancel();
+        } catch {}
+        reject(new Error('Storage upload timeout'));
+      }, 10000);
+
+      uploadTask.on(
+        'state_changed',
+        null,
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+        async () => {
+          clearTimeout(timer);
+          try {
+            resolve(await getDownloadURL(uploadTask.snapshot.ref));
+          } catch (e) {
+            reject(e);
+          }
+        }
+      );
+    });
+    return uploadedUrl;
+  } catch (e) {
+    console.warn('Payment proof upload using compressed Data URL fallback:', e);
+    return dataUrl;
+  }
+}
+
+export function getEffectivePaymentStatus(order: TShirtOrder): OrderPaymentStatus {
+  if (order.paymentStatus) return order.paymentStatus;
+  if (order.status === 'Confirmed' || order.status === 'Processing' || order.status === 'Shipped' || order.status === 'Delivered') {
+    return 'Verified';
+  }
+  if (order.status === 'Payment Verification') {
+    return 'Under Verification';
+  }
+  if (order.paymentProofUrl || order.paymentTxnId) {
+    return 'Screenshot Uploaded';
+  }
+  return 'Awaiting Payment';
+}
+
+export function getEffectiveDeliveryStatus(order: TShirtOrder): DeliveryStatus {
+  if (order.deliveryStatus) return order.deliveryStatus;
+  switch (order.status) {
+    case 'Confirmed':
+      return 'Order Confirmed';
+    case 'Processing':
+      return 'Processing';
+    case 'Shipped':
+      return 'Shipped';
+    case 'Delivered':
+      return 'Delivered';
+    default:
+      return 'Order Confirmed';
+  }
+}
+
+export function isValidHttpUrl(url?: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+export function getCourierTrackingUrl(courier?: CourierInfo): string | null {
+  if (!courier) return null;
+  if (isValidHttpUrl(courier.trackingUrl)) {
+    return courier.trackingUrl!.trim();
+  }
+  return null;
+}
+
+export async function createCustomerNotification(
+  payload: Omit<CustomerNotification, 'id' | 'read' | 'createdAt'>
+): Promise<CustomerNotification> {
+  const id = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const notification: CustomerNotification = {
+    ...payload,
+    id,
+    read: false,
+    createdAt: new Date().toISOString(),
+  };
+  await setDoc(doc(db, NOTIFICATIONS_COLLECTION, id), stripUndefined(notification));
+  return notification;
+}
+
+export function subscribeToCustomerNotifications(
+  orderIds: string[],
+  onData: (notifications: CustomerNotification[]) => void
+): Unsubscribe {
+  const idSet = new Set(orderIds.filter(Boolean));
+  if (idSet.size === 0) {
+    onData([]);
+    return () => {};
+  }
+  const colRef = collection(db, NOTIFICATIONS_COLLECTION);
+  return onSnapshot(
+    colRef,
+    (snapshot) => {
+      const list: CustomerNotification[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as CustomerNotification;
+        if (idSet.has(data.orderId)) {
+          list.push({ ...data, id: docSnap.id });
+        }
+      });
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      onData(list);
+    },
+    (err) => {
+      console.warn('Customer notifications listener error:', err);
+    }
+  );
+}
+
+export async function markCustomerNotificationRead(notificationId: string): Promise<void> {
+  await updateDoc(doc(db, NOTIFICATIONS_COLLECTION, notificationId), { read: true });
+}
+
+export async function findDuplicateTransactionId(
+  txnId: string,
+  excludeOrderId?: string
+): Promise<string | null> {
+  const cleaned = txnId.trim().toUpperCase();
+  if (!cleaned) return null;
+  try {
+    const snapshot = await getDocs(collection(db, ORDERS_COLLECTION));
+    let duplicateOrderId: string | null = null;
+    snapshot.forEach((docSnap) => {
+      const data = docSnap.data() as TShirtOrder;
+      if (
+        docSnap.id !== excludeOrderId &&
+        data.paymentTxnId &&
+        data.paymentTxnId.trim().toUpperCase() === cleaned &&
+        data.status !== 'Cancelled' &&
+        data.paymentStatus !== 'Rejected'
+      ) {
+        duplicateOrderId = docSnap.id;
+      }
+    });
+    return duplicateOrderId;
+  } catch {
+    return null;
+  }
+}
+
+function buildAuditLog(
+  action: string,
+  details: string,
+  actorId: string,
+  actorName?: string
+): AuditLogEntry {
+  return stripUndefined({
+    id: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    action,
+    details,
+    actorId,
+    actorName,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function doesPhoneMatchOrder(order: TShirtOrder, mobileNumber: string): boolean {
+  const cleanPhone = normalizePhoneDigits(mobileNumber);
+  if (cleanPhone.length < 6) return false;
+  const orderPhone = normalizePhoneDigits(order.customer?.phone);
+  const payerPhone = normalizePhoneDigits(order.paymentPayerPhone);
+  return (
+    Boolean(orderPhone && (orderPhone.endsWith(cleanPhone.slice(-8)) || cleanPhone.endsWith(orderPhone.slice(-8)))) ||
+    Boolean(payerPhone && (payerPhone.endsWith(cleanPhone.slice(-8)) || cleanPhone.endsWith(payerPhone.slice(-8))))
+  );
+}
 
 export async function createTShirtOrder(
-  orderData: Omit<import('../types').TShirtOrder, 'id' | 'createdAt' | 'status'>,
+  orderData: Omit<TShirtOrder, 'id' | 'createdAt' | 'status'>,
   paymentProofFile?: File | null
-): Promise<import('../types').TShirtOrder> {
+): Promise<TShirtOrder> {
+  if (!orderData.customer?.fullName?.trim() || normalizePhoneDigits(orderData.customer?.phone).length < 6) {
+    throw new Error('Valid customer name and mobile number are required.');
+  }
+  if (!orderData.customer?.streetAddress?.trim() || !orderData.customer?.city?.trim() || !orderData.customer?.zipCode?.trim()) {
+    throw new Error('Complete shipping address, city, and pincode are required.');
+  }
+  if (!orderData.quantity || orderData.quantity < 1 || !orderData.totalPrice || orderData.totalPrice <= 0) {
+    throw new Error('Invalid order quantity or total amount.');
+  }
+
   const timestamp = Date.now();
   const orderId = `ord_${timestamp}`;
-  let paymentProofUrl = orderData.paymentProofUrl || '';
 
-  if (paymentProofFile) {
-    try {
-      const { blob, dataUrl } = await compressImage(paymentProofFile, 1200, 0.85);
-      const storagePath = `order_proofs/${orderId}_proof.png`;
-      const storageRef = ref(storage, storagePath);
-      paymentProofUrl = dataUrl;
-      const uploadTask = uploadBytesResumable(storageRef, blob, { contentType: paymentProofFile.type || 'image/png' });
-      paymentProofUrl = await new Promise<string>((resolve, reject) => {
-        uploadTask.on('state_changed', null, reject, async () => {
-          resolve(await getDownloadURL(uploadTask.snapshot.ref));
-        });
-      });
-    } catch (e) {
-      console.warn('Payment proof upload fallback', e);
+  if (orderData.paymentTxnId) {
+    const dupOrder = await findDuplicateTransactionId(orderData.paymentTxnId, orderId);
+    if (dupOrder) {
+      throw new Error(`This Transaction/UTR ID is already linked to order #${dupOrder}.`);
     }
   }
 
-  const newOrder: import('../types').TShirtOrder = {
+  let paymentProofUrl = orderData.paymentProofUrl || '';
+  if (paymentProofFile) {
+    paymentProofUrl = await uploadOrderScreenshotFile(orderId, paymentProofFile);
+  }
+
+  // Never mark payment Verified automatically upon upload
+  const initialPaymentStatus: OrderPaymentStatus =
+    paymentProofUrl || orderData.paymentTxnId ? 'Screenshot Uploaded' : 'Awaiting Payment';
+
+  const nowIso = new Date().toISOString();
+  const initialHistory: PaymentVerificationEntry[] =
+    paymentProofUrl || orderData.paymentTxnId
+      ? [
+          {
+            id: `pv_${timestamp}`,
+            status: 'Screenshot Uploaded',
+            reason: 'Submitted at checkout',
+            adminId: 'customer',
+            adminName: orderData.customer.fullName,
+            timestamp: nowIso,
+          },
+        ]
+      : [];
+
+  const initialAuditLogs: AuditLogEntry[] = [
+    buildAuditLog(
+      'ORDER_PLACED',
+      `Order placed for ${orderData.quantity}x ${orderData.garmentName} (${orderData.size}) totaling $${orderData.totalPrice.toFixed(2)}.`,
+      'customer',
+      orderData.customer.fullName
+    ),
+  ];
+  if (initialPaymentStatus === 'Screenshot Uploaded') {
+    initialAuditLogs.push(
+      buildAuditLog(
+        'PAYMENT_SUBMITTED',
+        `Initial payment proof submitted at checkout (${orderData.paymentTxnId || 'Screenshot uploaded'}).`,
+        'customer',
+        orderData.customer.fullName
+      )
+    );
+  }
+
+  const newOrder: TShirtOrder = stripUndefined({
     ...orderData,
     id: orderId,
-    createdAt: new Date().toISOString(),
-    status: 'Pending',
-    paymentProofUrl,
-  };
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    status: paymentProofUrl || orderData.paymentTxnId ? 'Payment Verification' : 'Pending',
+    paymentProofUrl: paymentProofUrl || undefined,
+    paymentStatus: initialPaymentStatus,
+    paymentAmount: orderData.paymentAmount ?? orderData.totalPrice,
+    paymentDate: orderData.paymentDate ?? (paymentProofUrl || orderData.paymentTxnId ? nowIso.slice(0, 10) : undefined),
+    paymentPayerPhone: orderData.paymentPayerPhone ?? orderData.customer.phone,
+    verificationHistory: initialHistory,
+    auditLogs: initialAuditLogs,
+  });
 
   await setDoc(doc(db, ORDERS_COLLECTION, orderId), newOrder);
+
+  createCustomerNotification({
+    orderId,
+    customerPhone: orderData.customer.phone,
+    type: 'order_placed',
+    title: 'Order Placed Successfully',
+    message: `Your order #${orderId} (${orderData.quantity}x ${orderData.garmentName}, ${orderData.size}) for $${orderData.totalPrice.toFixed(2)} has been placed.`,
+  }).catch(() => {});
+
+  if (initialPaymentStatus === 'Screenshot Uploaded') {
+    createCustomerNotification({
+      orderId,
+      customerPhone: orderData.customer.phone,
+      type: 'payment_submitted',
+      title: 'Payment Details Submitted',
+      message: `Payment proof for Order #${orderId} ($${orderData.totalPrice.toFixed(2)}) has been received and is awaiting admin verification.`,
+    }).catch(() => {});
+  }
+
   return newOrder;
 }
 
 export function subscribeToOrders(
-  onData: (orders: import('../types').TShirtOrder[]) => void,
+  onData: (orders: TShirtOrder[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
   const colRef = collection(db, ORDERS_COLLECTION);
   return onSnapshot(
     colRef,
-    (snapshot) => {
-      const items: import('../types').TShirtOrder[] = [];
+    async (snapshot) => {
+      const items: TShirtOrder[] = [];
+      const idbPromises: Array<Promise<void>> = [];
+
       snapshot.forEach((docSnap) => {
-        items.push({
+        const order = {
           id: docSnap.id,
           ...docSnap.data(),
-        } as import('../types').TShirtOrder);
+        } as TShirtOrder;
+
+        if (order.mockupImageUrl && order.mockupImageUrl.startsWith('idb://')) {
+          const key = order.mockupImageUrl.replace('idb://', '');
+          idbPromises.push(
+            getImageFromIndexedDb(key).then((blobUrl) => {
+              if (blobUrl) order.mockupImageUrl = blobUrl;
+            })
+          );
+        }
+
+        items.push(order);
       });
+
+      if (idbPromises.length > 0) {
+        await Promise.all(idbPromises);
+      }
+
       items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       onData(items);
     },
@@ -1015,7 +1368,450 @@ export function subscribeToOrders(
   );
 }
 
-export async function updateOrderStatus(orderId: string, status: import('../types').TShirtOrder['status']) {
-  await updateDoc(doc(db, ORDERS_COLLECTION, orderId), { status });
+export async function findCustomerOrderSecure(orderId: string, mobileNumber: string): Promise<TShirtOrder | null> {
+  const cleanId = orderId.trim().replace(/^#/, '');
+  const cleanPhone = normalizePhoneDigits(mobileNumber);
+  if (!cleanId || cleanPhone.length < 6) return null;
+
+  const snap = await getDoc(doc(db, ORDERS_COLLECTION, cleanId));
+  if (!snap.exists()) return null;
+
+  const order = { id: snap.id, ...snap.data() } as TShirtOrder;
+  if (!doesPhoneMatchOrder(order, mobileNumber)) {
+    throw new Error('Mobile number does not match this Order ID.');
+  }
+
+  return order;
+}
+
+export function subscribeToCustomerOrder(
+  orderId: string,
+  mobileNumber: string,
+  onData: (order: TShirtOrder | null) => void,
+  onError?: (err: Error) => void
+): Unsubscribe {
+  const cleanId = orderId.trim().replace(/^#/, '');
+  if (!cleanId || normalizePhoneDigits(mobileNumber).length < 6) {
+    return () => {};
+  }
+  return onSnapshot(
+    doc(db, ORDERS_COLLECTION, cleanId),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      const order = { id: snap.id, ...snap.data() } as TShirtOrder;
+      if (!doesPhoneMatchOrder(order, mobileNumber)) {
+        if (onError) onError(new Error('Mobile number does not match this Order ID.'));
+        return;
+      }
+      onData(order);
+    },
+    (err) => {
+      if (onError) onError(err);
+    }
+  );
+}
+
+export async function submitCustomerPaymentProof(
+  order: TShirtOrder,
+  payload: {
+    paymentTxnId: string;
+    paymentDate: string;
+    paymentTime?: string;
+    paymentPayerPhone: string;
+    paymentAmount: number;
+    paymentMethod: 'upi' | 'bank_transfer';
+  },
+  screenshotFile?: File | null
+): Promise<TShirtOrder> {
+  if (order.status === 'Cancelled') {
+    throw new Error('Cannot submit payment for a cancelled order.');
+  }
+  const currentPaymentStatus = getEffectivePaymentStatus(order);
+  if (currentPaymentStatus === 'Verified') {
+    throw new Error('Payment is already verified and cannot be modified.');
+  }
+
+  const trimmedTxn = payload.paymentTxnId.trim();
+  if (!trimmedTxn) {
+    throw new Error('Please enter your UPI Transaction ID / UTR Number.');
+  }
+  if (!payload.paymentDate) {
+    throw new Error('Please enter the payment date.');
+  }
+  if (normalizePhoneDigits(payload.paymentPayerPhone).length < 6) {
+    throw new Error('Please enter a valid customer mobile number.');
+  }
+  if (!payload.paymentAmount || payload.paymentAmount <= 0) {
+    throw new Error('Please enter a valid payment amount.');
+  }
+
+  const dupOrder = await findDuplicateTransactionId(trimmedTxn, order.id);
+  if (dupOrder) {
+    throw new Error(`Duplicate transaction detected: UTR "${trimmedTxn}" is already used on Order #${dupOrder}.`);
+  }
+
+  let proofUrl = order.paymentProofUrl || '';
+  if (screenshotFile) {
+    proofUrl = await uploadOrderScreenshotFile(order.id, screenshotFile);
+  } else if (!proofUrl) {
+    throw new Error('Please upload a payment screenshot (JPG, JPEG, PNG, or WEBP).');
+  }
+
+  const nowIso = new Date().toISOString();
+  const nextStatus: OrderStatus =
+    order.status === 'Pending' || order.status === 'Payment Verification' ? 'Payment Verification' : order.status;
+  const historyEntry: PaymentVerificationEntry = {
+    id: `pv_${Date.now()}`,
+    status: 'Screenshot Uploaded',
+    reason: order.paymentProofUrl ? 'Customer replaced payment screenshot / details' : 'Customer submitted payment proof',
+    adminId: 'customer',
+    adminName: order.customer.fullName,
+    timestamp: nowIso,
+  };
+
+  const updatedHistory = [...(order.verificationHistory || []), historyEntry];
+  const updatedAudit = [
+    ...(order.auditLogs || []),
+    buildAuditLog(
+      'PAYMENT_SUBMITTED',
+      `${order.paymentProofUrl ? 'Replaced' : 'Submitted'} payment proof (UTR: ${trimmedTxn}, Date: ${payload.paymentDate}, Amount: $${payload.paymentAmount.toFixed(2)}).`,
+      'customer',
+      order.customer.fullName
+    ),
+  ];
+
+  const updates: Partial<TShirtOrder> = stripUndefined({
+    paymentTxnId: trimmedTxn,
+    paymentDate: payload.paymentDate,
+    paymentTime: payload.paymentTime?.trim() || undefined,
+    paymentPayerPhone: payload.paymentPayerPhone.trim(),
+    paymentAmount: payload.paymentAmount,
+    paymentMethod: payload.paymentMethod,
+    paymentProofUrl: proofUrl,
+    paymentStatus: 'Screenshot Uploaded',
+    paymentRejectionReason: '',
+    status: nextStatus,
+    verificationHistory: updatedHistory,
+    auditLogs: updatedAudit,
+    updatedAt: nowIso,
+  });
+
+  await updateDoc(doc(db, ORDERS_COLLECTION, order.id), updates);
+
+  await createCustomerNotification({
+    orderId: order.id,
+    customerPhone: order.customer.phone,
+    type: 'payment_submitted',
+    title: 'Payment Submitted for Verification',
+    message: `Payment screenshot & UTR (${trimmedTxn}) for Order #${order.id} submitted. Our team will verify it shortly.`,
+  });
+
+  return { ...order, ...updates };
+}
+
+export async function verifyOrderPayment(
+  order: TShirtOrder,
+  nextPaymentStatus: OrderPaymentStatus,
+  adminUser: AdminUser | null,
+  reason?: string
+): Promise<void> {
+  if (!adminUser?.isAdmin) {
+    throw new Error('Unauthorized: Admin access is required to verify payments.');
+  }
+  if ((nextPaymentStatus === 'Rejected' || nextPaymentStatus === 'Awaiting Payment') && !reason?.trim()) {
+    throw new Error('Please provide a reason when rejecting payment or requesting a new screenshot.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const adminId = adminUser.uid || adminUser.email || 'admin';
+  const adminName = adminUser.displayName || adminUser.email || 'NextPrinters Admin';
+
+  const historyEntry: PaymentVerificationEntry = stripUndefined({
+    id: `pv_${Date.now()}`,
+    status: nextPaymentStatus,
+    reason: reason?.trim() || undefined,
+    adminId,
+    adminName,
+    timestamp: nowIso,
+  });
+
+  const auditEntry = buildAuditLog(
+    'PAYMENT_VERIFICATION',
+    `Payment verification set to "${nextPaymentStatus}"${reason?.trim() ? ` (${reason.trim()})` : ''}.`,
+    adminId,
+    adminName
+  );
+
+  const updates: Partial<TShirtOrder> = {
+    paymentStatus: nextPaymentStatus,
+    verificationHistory: [...(order.verificationHistory || []), historyEntry],
+    auditLogs: [...(order.auditLogs || []), auditEntry],
+    updatedAt: nowIso,
+  };
+
+  let becameConfirmed = false;
+  if (nextPaymentStatus === 'Verified') {
+    updates.verifiedBy = adminId;
+    updates.verifiedAt = nowIso;
+    updates.paymentRejectionReason = '';
+    if (order.status === 'Pending' || order.status === 'Payment Verification') {
+      updates.status = 'Confirmed';
+      becameConfirmed = true;
+    }
+    if (!order.deliveryStatus) {
+      updates.deliveryStatus = 'Order Confirmed';
+    }
+  } else if (nextPaymentStatus === 'Rejected' || nextPaymentStatus === 'Awaiting Payment') {
+    updates.paymentRejectionReason = reason?.trim() || 'Verification failed. Please upload a clear payment screenshot.';
+    if (order.status === 'Confirmed') {
+      updates.status = 'Payment Verification';
+    }
+  } else if (nextPaymentStatus === 'Under Verification') {
+    updates.status = 'Payment Verification';
+  }
+
+  await updateDoc(doc(db, ORDERS_COLLECTION, order.id), stripUndefined(updates));
+
+  if (nextPaymentStatus === 'Verified') {
+    await createCustomerNotification({
+      orderId: order.id,
+      customerPhone: order.customer.phone,
+      type: 'payment_verified',
+      title: 'Payment Verified!',
+      message: `Great news! Your payment for Order #${order.id} has been verified by ${adminName}.`,
+    });
+    if (becameConfirmed) {
+      await createCustomerNotification({
+        orderId: order.id,
+        customerPhone: order.customer.phone,
+        type: 'order_confirmed',
+        title: 'Order Confirmed',
+        message: `Order #${order.id} is confirmed and queued for print production.`,
+      });
+    }
+  } else if (nextPaymentStatus === 'Rejected' || nextPaymentStatus === 'Awaiting Payment') {
+    await createCustomerNotification({
+      orderId: order.id,
+      customerPhone: order.customer.phone,
+      type: 'payment_rejected',
+      title: nextPaymentStatus === 'Rejected' ? 'Payment Rejected' : 'New Payment Screenshot Requested',
+      message: `Action required for Order #${order.id}: ${updates.paymentRejectionReason}`,
+    });
+  }
+}
+
+export async function updateOrderStatus(
+  order: TShirtOrder,
+  status: OrderStatus,
+  adminUser: AdminUser | null,
+  adminNotes?: string
+): Promise<void> {
+  if (!adminUser?.isAdmin) {
+    throw new Error('Unauthorized: Only an authorized admin can update order status.');
+  }
+
+  if (status === 'Delivered') {
+    const company =
+      order.courier?.courierCompany === 'Other'
+        ? order.courier?.customCourierName?.trim()
+        : order.courier?.courierCompany?.trim();
+    if (!company || !order.courier?.trackingId?.trim()) {
+      throw new Error(
+        'Cannot mark order as Delivered without verified Courier Company and Tracking ID. Please assign courier details first.'
+      );
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const adminId = adminUser.uid || adminUser.email || 'admin';
+  const adminName = adminUser.displayName || adminUser.email || 'Admin';
+
+  let syncedDeliveryStatus = order.deliveryStatus;
+  if (status === 'Confirmed' && !order.deliveryStatus) syncedDeliveryStatus = 'Order Confirmed';
+  else if (status === 'Processing' && (!order.deliveryStatus || order.deliveryStatus === 'Order Confirmed')) {
+    syncedDeliveryStatus = 'Processing';
+  } else if (status === 'Shipped') {
+    syncedDeliveryStatus = 'Shipped';
+  } else if (status === 'Delivered') {
+    syncedDeliveryStatus = 'Delivered';
+  }
+
+  const auditEntry = buildAuditLog(
+    'ORDER_STATUS_UPDATED',
+    `Order status changed from "${order.status}" to "${status}".`,
+    adminId,
+    adminName
+  );
+
+  const updates: Partial<TShirtOrder> = stripUndefined({
+    status,
+    deliveryStatus: syncedDeliveryStatus,
+    adminNotes: adminNotes !== undefined ? adminNotes : order.adminNotes,
+    auditLogs: [...(order.auditLogs || []), auditEntry],
+    updatedAt: nowIso,
+  });
+
+  await updateDoc(doc(db, ORDERS_COLLECTION, order.id), updates);
+
+  if (status === 'Confirmed' && order.status !== 'Confirmed') {
+    await createCustomerNotification({
+      orderId: order.id,
+      customerPhone: order.customer.phone,
+      type: 'order_confirmed',
+      title: 'Order Confirmed',
+      message: `Your custom order #${order.id} has been confirmed by our team.`,
+    });
+  } else if (status === 'Shipped' && order.status !== 'Shipped') {
+    await createCustomerNotification({
+      orderId: order.id,
+      customerPhone: order.customer.phone,
+      type: 'order_shipped',
+      title: 'Order Shipped',
+      message: `Order #${order.id} has been marked as shipped.${order.courier?.trackingId ? ` Tracking ID: ${order.courier.trackingId}` : ''}`,
+    });
+  } else if (status === 'Delivered' && order.status !== 'Delivered') {
+    await createCustomerNotification({
+      orderId: order.id,
+      customerPhone: order.customer.phone,
+      type: 'order_delivered',
+      title: 'Order Delivered',
+      message: `Order #${order.id} has been delivered. Thank you for choosing NextPrinters!`,
+    });
+  }
+}
+
+export async function updateOrderAdminNotes(
+  order: TShirtOrder,
+  adminNotes: string,
+  adminUser: AdminUser | null
+): Promise<void> {
+  if (!adminUser?.isAdmin) {
+    throw new Error('Unauthorized: Admin access is required to update internal notes.');
+  }
+  const adminId = adminUser.uid || adminUser.email || 'admin';
+  const adminName = adminUser.displayName || adminUser.email || 'Admin';
+  const auditEntry = buildAuditLog(
+    'ADMIN_NOTES_UPDATED',
+    adminNotes ? `Admin notes updated: "${adminNotes.slice(0, 120)}"` : 'Admin notes cleared.',
+    adminId,
+    adminName
+  );
+  await updateDoc(doc(db, ORDERS_COLLECTION, order.id), {
+    adminNotes,
+    auditLogs: [...(order.auditLogs || []), auditEntry],
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function mapDeliveryStatusToNotification(
+  deliveryStatus: DeliveryStatus
+): { type: CustomerNotificationType; title: string } {
+  switch (deliveryStatus) {
+    case 'Order Confirmed':
+      return { type: 'order_confirmed', title: 'Order Confirmed' };
+    case 'Packed':
+      return { type: 'order_packed', title: 'Order Packed' };
+    case 'Shipped':
+      return { type: 'order_shipped', title: 'Order Shipped' };
+    case 'Out for Delivery':
+      return { type: 'order_out_for_delivery', title: 'Out for Delivery' };
+    case 'Delivered':
+      return { type: 'order_delivered', title: 'Order Delivered' };
+    default:
+      return { type: 'courier_updated', title: `Delivery Update: ${deliveryStatus}` };
+  }
+}
+
+export async function updateOrderCourierAndDelivery(
+  order: TShirtOrder,
+  courierData: CourierInfo,
+  deliveryStatus: DeliveryStatus,
+  remarks: string,
+  adminUser: AdminUser | null
+): Promise<void> {
+  if (!adminUser?.isAdmin) {
+    throw new Error('Unauthorized: Only an authorized admin can update delivery status.');
+  }
+
+  const companyName =
+    courierData.courierCompany === 'Other'
+      ? courierData.customCourierName?.trim() || ''
+      : courierData.courierCompany?.trim() || '';
+
+  if (deliveryStatus === 'Delivered') {
+    if (!companyName || !courierData.trackingId?.trim()) {
+      throw new Error(
+        'Cannot mark as Delivered without verified Courier Company and Tracking ID / AWB Number.'
+      );
+    }
+  }
+
+  if (courierData.trackingUrl && !isValidHttpUrl(courierData.trackingUrl)) {
+    throw new Error('Tracking URL must be a valid https:// or http:// link, or leave it blank.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const adminId = adminUser.uid || adminUser.email || 'admin';
+  const updatedBy = adminUser.displayName || adminUser.email || adminId || 'Admin';
+
+  const historyEntry: DeliveryHistoryEntry = stripUndefined({
+    id: `dh_${Date.now()}`,
+    status: deliveryStatus,
+    remarks: remarks.trim() || undefined,
+    courierCompany: companyName || undefined,
+    trackingId: courierData.trackingId?.trim() || undefined,
+    updatedBy,
+    timestamp: nowIso,
+  });
+
+  const auditEntry = buildAuditLog(
+    'COURIER_DELIVERY_UPDATED',
+    `Delivery set to "${deliveryStatus}"${companyName ? ` via ${companyName}` : ''}${courierData.trackingId?.trim() ? ` (AWB: ${courierData.trackingId.trim()})` : ''}.`,
+    adminId,
+    updatedBy
+  );
+
+  let syncedOrderStatus: OrderStatus = order.status;
+  if (deliveryStatus === 'Delivered') syncedOrderStatus = 'Delivered';
+  else if (deliveryStatus === 'Shipped' || deliveryStatus === 'In Transit' || deliveryStatus === 'Out for Delivery') {
+    syncedOrderStatus = 'Shipped';
+  } else if (deliveryStatus === 'Processing' || deliveryStatus === 'Packed' || deliveryStatus === 'Ready for Dispatch') {
+    syncedOrderStatus = 'Processing';
+  } else if (deliveryStatus === 'Order Confirmed' && (order.status === 'Pending' || order.status === 'Payment Verification')) {
+    syncedOrderStatus = 'Confirmed';
+  }
+
+  const cleanCourier: CourierInfo = stripUndefined({
+    ...courierData,
+    trackingId: courierData.trackingId?.trim() || undefined,
+    trackingUrl: courierData.trackingUrl?.trim() || undefined,
+    deliveryNotes: courierData.deliveryNotes?.trim() || undefined,
+    customCourierName: courierData.customCourierName?.trim() || undefined,
+  });
+
+  const updates: Partial<TShirtOrder> = {
+    courier: cleanCourier,
+    deliveryStatus,
+    status: syncedOrderStatus,
+    deliveryHistory: [...(order.deliveryHistory || []), historyEntry],
+    auditLogs: [...(order.auditLogs || []), auditEntry],
+    updatedAt: nowIso,
+  };
+
+  await updateDoc(doc(db, ORDERS_COLLECTION, order.id), stripUndefined(updates));
+
+  const notifMeta = mapDeliveryStatusToNotification(deliveryStatus);
+  await createCustomerNotification({
+    orderId: order.id,
+    customerPhone: order.customer.phone,
+    type: notifMeta.type,
+    title: notifMeta.title,
+    message: companyName
+      ? `Order #${order.id} is now "${deliveryStatus}" via ${companyName}${courierData.trackingId ? ` (AWB: ${courierData.trackingId})` : ''}.`
+      : `Order #${order.id} delivery status updated to "${deliveryStatus}".`,
+  });
 }
 

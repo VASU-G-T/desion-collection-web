@@ -1,15 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { CustomerAddress, SiteSettings, TShirtSize, TShirtOrder } from '../types';
-import { createTShirtOrder } from '../services/firebaseGalleryService';
-import { X, ShoppingBag, QrCode, CreditCard, CheckCircle2, AlertCircle, Upload, Truck, ShieldCheck, DollarSign } from 'lucide-react';
+import { createTShirtOrder, validatePaymentScreenshot } from '../services/firebaseGalleryService';
+import { saveLocalCustomerOrderRef } from './CustomerOrderPortalModal';
+import { X, ShoppingBag, QrCode, CreditCard, CheckCircle2, AlertCircle, Truck, ShieldCheck } from 'lucide-react';
 
 interface OrderTShirtModalProps {
   isOpen: boolean;
   onClose: () => void;
   siteSettings: SiteSettings | null;
   garmentName: string;
+  garmentColor?: string;
   mockupImageUrl?: string;
   placedDesignsCount: number;
+  onOpenOrderPortal?: (orderId: string, phone: string) => void;
 }
 
 export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
@@ -17,11 +20,11 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
   onClose,
   siteSettings,
   garmentName,
+  garmentColor,
   mockupImageUrl,
   placedDesignsCount,
+  onOpenOrderPortal,
 }) => {
-  if (!isOpen) return null;
-
   // Order Details State
   const [size, setSize] = useState<TShirtSize>('L');
   const [quantity, setQuantity] = useState<number>(1);
@@ -32,16 +35,19 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
   const [customer, setCustomer] = useState<CustomerAddress>({
     fullName: '',
     phone: '',
+    email: '',
     streetAddress: '',
     city: '',
+    district: '',
     state: '',
     zipCode: '',
-    country: 'United States',
+    country: 'India',
   });
 
   // Payment State
   const [paymentMethod, setPaymentMethod] = useState<'qr_code' | 'card'>('qr_code');
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
+  const [paymentProofPreview, setPaymentProofPreview] = useState<string | null>(null);
   const [paymentTxnId, setPaymentTxnId] = useState('');
 
   // Card State
@@ -55,6 +61,18 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirmedOrder, setConfirmedOrder] = useState<TShirtOrder | null>(null);
 
+  useEffect(() => {
+    if (!paymentProofFile) {
+      setPaymentProofPreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(paymentProofFile);
+    setPaymentProofPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [paymentProofFile]);
+
+  if (!isOpen) return null;
+
   const handleAddressChange = (field: keyof CustomerAddress, value: string) => {
     setCustomer((prev) => ({ ...prev, [field]: value }));
   };
@@ -63,7 +81,6 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
     e.preventDefault();
     setErrorMsg(null);
 
-    // Validation
     if (!customer.fullName || !customer.phone || !customer.streetAddress || !customer.city || !customer.zipCode) {
       setErrorMsg('Please complete all required customer shipping address fields.');
       return;
@@ -84,7 +101,9 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
         {
           customer,
           size,
+          color: garmentColor || garmentName,
           quantity,
+          unitPrice,
           totalPrice,
           paymentMethod,
           paymentTxnId: paymentTxnId.trim() || undefined,
@@ -96,6 +115,7 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
         paymentProofFile
       );
 
+      saveLocalCustomerOrderRef(newOrder.id, newOrder.customer.phone);
       setConfirmedOrder(newOrder);
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to place order. Please try again.');
@@ -135,7 +155,7 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
 
           {/* Success Screen */}
           {confirmedOrder ? (
-            <div className="text-center py-8 space-y-5">
+            <div className="text-center py-6 space-y-5">
               <div className="w-16 h-16 bg-emerald-500/10 text-emerald-500 border border-emerald-500/30 rounded-full flex items-center justify-center mx-auto">
                 <CheckCircle2 className="w-10 h-10" />
               </div>
@@ -164,15 +184,30 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
               </div>
 
               <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                Our print team is preparing your custom garment. You will receive SMS & WhatsApp shipping updates.
+                Use your Order ID & Mobile Number anytime to submit/replace payment proof or track courier updates.
               </p>
 
-              <button
-                onClick={onClose}
-                className="bg-slate-900 hover:bg-slate-800 text-white font-bold px-8 py-3 rounded-2xl text-xs transition-colors shadow-lg"
-              >
-                Close & Return to Gallery
-              </button>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                {onOpenOrderPortal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenOrderPortal(confirmedOrder.id, confirmedOrder.customer.phone);
+                    }}
+                    className="bg-sky-500 hover:bg-sky-600 text-white font-bold px-6 py-3 rounded-2xl text-xs transition-colors shadow-lg shadow-sky-500/20 flex items-center gap-2"
+                  >
+                    <Truck className="w-4 h-4" />
+                    <span>Submit Payment & Track Order</span>
+                  </button>
+                )}
+                <button
+                  onClick={onClose}
+                  className="bg-slate-900 hover:bg-slate-800 text-white font-bold px-6 py-3 rounded-2xl text-xs transition-colors shadow-lg"
+                >
+                  Close & Return to Gallery
+                </button>
+              </div>
             </div>
           ) : (
             <form onSubmit={handleSubmitOrder} className="space-y-6">
@@ -257,7 +292,18 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       required
                       value={customer.phone}
                       onChange={(e) => handleAddressChange('phone', e.target.value)}
-                      placeholder="+1 (555) 000-0000"
+                      placeholder="+91 98765 43210"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="text-[11px] font-semibold text-slate-700 block mb-1">Email Address (Optional)</label>
+                    <input
+                      type="email"
+                      value={customer.email || ''}
+                      onChange={(e) => handleAddressChange('email', e.target.value)}
+                      placeholder="customer@example.com"
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
                     />
                   </div>
@@ -281,7 +327,18 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       required
                       value={customer.city}
                       onChange={(e) => handleAddressChange('city', e.target.value)}
-                      placeholder="New York"
+                      placeholder="Chennai"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-700 block mb-1">District (Optional)</label>
+                    <input
+                      type="text"
+                      value={customer.district || ''}
+                      onChange={(e) => handleAddressChange('district', e.target.value)}
+                      placeholder="District"
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
                     />
                   </div>
@@ -292,7 +349,7 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       type="text"
                       value={customer.state}
                       onChange={(e) => handleAddressChange('state', e.target.value)}
-                      placeholder="NY"
+                      placeholder="Tamil Nadu"
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
                     />
                   </div>
@@ -304,18 +361,18 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       required
                       value={customer.zipCode}
                       onChange={(e) => handleAddressChange('zipCode', e.target.value)}
-                      placeholder="10001"
+                      placeholder="600001"
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
                     />
                   </div>
 
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="text-[11px] font-semibold text-slate-700 block mb-1">Country</label>
                     <input
                       type="text"
                       value={customer.country}
                       onChange={(e) => handleAddressChange('country', e.target.value)}
-                      placeholder="United States"
+                      placeholder="India"
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-sky-500"
                     />
                   </div>
@@ -380,7 +437,7 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       )}
 
                       <p className="text-[11px] text-slate-500 max-w-xs mx-auto">
-                        Scan with GPay, PhonePe, Paytm or any UPI App to pay <strong className="text-slate-900">${totalPrice}</strong>.
+                        Scan with GPay, PhonePe, Paytm or any UPI App to pay <strong className="text-slate-900">${totalPrice}</strong>. (You can also submit proof after placing your order.)
                       </p>
                     </div>
 
@@ -397,19 +454,42 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       </div>
 
                       <div>
-                        <label className="text-[11px] font-semibold text-slate-700 block mb-1">Upload Payment Screenshot</label>
+                        <label className="text-[11px] font-semibold text-slate-700 block mb-1">Upload Payment Screenshot (JPG/PNG/WEBP)</label>
                         <input
                           type="file"
-                          accept="image/*"
+                          accept="image/png, image/jpeg, image/jpg, image/webp"
                           onChange={(e) => {
                             if (e.target.files && e.target.files[0]) {
-                              setPaymentProofFile(e.target.files[0]);
+                              const f = e.target.files[0];
+                              const check = validatePaymentScreenshot(f);
+                              if (!check.valid) {
+                                setErrorMsg(check.error || 'Invalid screenshot');
+                                return;
+                              }
+                              setErrorMsg(null);
+                              setPaymentProofFile(f);
                             }
                           }}
                           className="w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-xs text-slate-700 focus:outline-none cursor-pointer"
                         />
                       </div>
                     </div>
+
+                    {paymentProofPreview && (
+                      <div className="flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl p-2.5">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <img src={paymentProofPreview} alt="Payment Preview" className="w-12 h-12 rounded-lg object-contain border border-slate-200" />
+                          <span className="text-[11px] font-semibold text-slate-700 truncate">{paymentProofFile?.name}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPaymentProofFile(null)}
+                          className="text-[11px] font-bold text-red-500 hover:underline shrink-0"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -427,7 +507,7 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                       />
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-4 gap-3">
                       <div className="col-span-2">
                         <label className="text-[11px] font-semibold text-slate-700 block mb-1">Card Number *</label>
                         <input
@@ -448,6 +528,18 @@ export const OrderTShirtModal: React.FC<OrderTShirtModalProps> = ({
                           value={cardExpiry}
                           onChange={(e) => setCardExpiry(e.target.value)}
                           placeholder="MM/YY"
+                          className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono text-slate-900 focus:outline-none focus:border-sky-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-700 block mb-1">CVC *</label>
+                        <input
+                          type="password"
+                          maxLength={4}
+                          value={cardCvc}
+                          onChange={(e) => setCardCvc(e.target.value.replace(/\D/g, ''))}
+                          placeholder="123"
                           className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono text-slate-900 focus:outline-none focus:border-sky-500"
                         />
                       </div>

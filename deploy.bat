@@ -1,8 +1,10 @@
 @echo off
-echo Starting Vercel Deployment...
-echo Please follow the prompts below. A browser window may open to log you in.
+set NODE_OPTIONS=--use-system-ca
+echo Starting Vercel Production Deployment...
+echo If prompted, complete Vercel login in your browser.
 echo.
-npx vercel
+npx vercel --prod
 echo.
 echo Deployment process finished.
 pause
+
